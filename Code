@@ -1,0 +1,253 @@
+Code: 
+
+import tkinter as tk
+from tkinter import ttk, filedialog
+from threading import Thread, Event
+from PIL import Image, ImageTk
+import os
+import hashlib
+import requests
+import time
+
+def create_rounded_rectangle(self, x1, y1, x2, y2, radius, **kwargs):
+    self.create_arc(x1, y1, x1 + 2 * radius, y1 + 2 * radius, start=90, extent=90, **kwargs)
+    self.create_arc(x2 - 2 * radius, y1, x2, y1 + 2 * radius, start=0, extent=90, **kwargs)
+    self.create_arc(x2 - 2 * radius, y2 - 2 * radius, x2, y2, start=270, extent=90, **kwargs)
+    self.create_arc(x1, y2 - 2 * radius, x1 + 2 * radius, y2, start=180, extent=90, **kwargs)
+    self.create_rectangle(x1 + radius, y1, x2 - radius, y2, **kwargs)
+    self.create_rectangle(x1, y1 + radius, x2, y2 - radius, **kwargs)
+
+tk.Canvas.create_rounded_rectangle = create_rounded_rectangle
+
+def generate_hash(filename):
+    with open(filename, "rb") as f:
+        file_hash = hashlib.sha256(f.read()).hexdigest()
+    return file_hash
+
+def check_hash_with_malwarebazaar(file_hash):
+    url = "https://mb-api.abuse.ch/api/v1/"
+    payload = {"query": "get_info", "hash": file_hash}
+    try:
+        response = requests.post(url, data=payload)
+        response.raise_for_status()
+        data = response.json()
+        if data.get('query_status') == 'hash_not_found':
+            return False
+        return True
+    except requests.RequestException as e:
+        print(f"Fehler bei der API-Anfrage: {e}")
+        return False
+
+def update_progress_labels(current_file, malware_count, scanned_files, elapsed_time):
+    current_file_label.config(text=f"Scanne Datei: {current_file}")
+    malware_label.config(text=f"Malware gefunden: {malware_count}")
+    scanned_files_label.config(text=f"Gesamt gescannte Dateien: {scanned_files}")
+    elapsed_time_label.config(text=f"Verstrichene Zeit: {elapsed_time}")
+
+def scan_directory(directory, stop_event, scan_type, custom_dirs=None):
+    malware_count = 0
+    total_files = 0
+    scanned_files = 0
+    start_time = time.time()
+
+    def scan_file(file_path):
+        nonlocal malware_count, scanned_files
+        try:
+            file_hash = generate_hash(file_path)
+            is_malware = check_hash_with_malwarebazaar(file_hash)
+            if is_malware:
+                malware_count += 1
+                if settings['delete_files']:
+                    try:
+                        os.remove(file_path)
+                    except FileNotFoundError:
+                        pass
+        except PermissionError:
+            pass
+        finally:
+            scanned_files += 1
+            update_progress_labels(file_path, malware_count, scanned_files,
+                                   format_elapsed_time(time.time() - start_time))
+
+    def scan_quick(directory):
+        important_dirs = [
+            directory,
+            os.path.join(directory, "Documents"),
+            os.path.join(directory, "Downloads"),
+            os.path.join(directory, "Desktop"),
+            os.path.join(directory, "Pictures"),
+            os.path.join(directory, "Videos")
+        ]
+        allowed_extensions = ['.exe', '.doc', '.docx', '.pdf', '.jpg', '.png', '.zip']
+        max_files_per_dir = 30
+
+        for dir in important_dirs:
+            if stop_event.is_set():
+                break
+            if os.path.exists(dir):
+                file_list = []
+                for root, dirs, files in os.walk(dir):
+                    filtered_files = [f for f in files if os.path.splitext(f)[1].lower() in allowed_extensions]
+                    file_list.extend([os.path.join(root, f) for f in filtered_files])
+                    if len(file_list) >= max_files_per_dir:
+                        break
+                for file_path in file_list[:max_files_per_dir]:
+                    if stop_event.is_set():
+                        break
+                    scan_file(file_path)
+
+    def scan_full(directory):
+        nonlocal total_files
+        for root, dirs, files in os.walk(directory):
+            total_files += len(files)
+        for root, dirs, files in os.walk(directory):
+            if stop_event.is_set():
+                break
+            for file in files:
+                file_path = os.path.join(root, file)
+                scan_file(file_path)
+
+    def scan_custom(directory):
+        if custom_dirs:
+            for dir in custom_dirs:
+                if stop_event.is_set():
+                    break
+                if os.path.exists(dir):
+                    for root, dirs, files in os.walk(dir):
+                        for file in files:
+                            file_path = os.path.join(root, file)
+                            scan_file(file_path)
+
+    if scan_type == "quick":
+        scan_quick(directory)
+    elif scan_type == "full":
+        scan_full(directory)
+    elif scan_type == "custom":
+        scan_custom(custom_dirs)
+    else:
+        print("Unbekannter Scan-Typ")
+
+    update_progress_labels("", malware_count, scanned_files, format_elapsed_time(time.time() - start_time))
+
+def format_elapsed_time(seconds):
+    mins, secs = divmod(int(seconds), 60)
+    return f"{mins:02}:{secs:02}"
+
+def start_scan(scan_type):
+    global scan_window, current_file_label, malware_label, scanned_files_label, elapsed_time_label, stop_event
+
+    directory = os.path.expanduser("~")
+    custom_dirs = None
+
+    if scan_type == "custom":
+        custom_dirs = filedialog.askdirectory(mustexist=True,
+                                              title="Wählen Sie die Verzeichnisse für einen benutzerdefinierten Scan").splitlines()
+
+    stop_event.clear()
+
+    scan_window = tk.Toplevel()
+    scan_window.title("Scan-Prozess")
+    scan_window.geometry("600x500")
+    bg_color = '#1e1e1e'
+    scan_window.configure(bg=bg_color)
+
+    scan_logo_img = load_image(f"{scan_type}.png", size=(100, 100), maintain_aspect_ratio=True)
+    scan_logo_label = tk.Label(scan_window, image=scan_logo_img, bg=bg_color)
+    scan_logo_label.image = scan_logo_img
+    scan_logo_label.pack(pady=(10, 20))
+
+    scan_type_label = tk.Label(scan_window, text=f"{scan_type.capitalize()} wird ausgeführt",
+                               font=("Arial", 14, "bold"), bg=bg_color, fg='#ffffff')
+    scan_type_label.pack(pady=10)
+
+    overlay_frame = tk.Canvas(scan_window, bg=bg_color, highlightthickness=0, width=500, height=350)
+    overlay_frame.pack(pady=20, padx=20)
+
+    overlay_frame.create_rounded_rectangle(10, 10, 490, 60, radius=20, fill='#2e2e2e', outline='#2e2e2e')
+    overlay_frame.create_rounded_rectangle(10, 70, 490, 120, radius=20, fill='#2e2e2e', outline='#2e2e2e')
+    overlay_frame.create_rounded_rectangle(10, 130, 490, 180, radius=20, fill='#2e2e2e', outline='#2e2e2e')
+    overlay_frame.create_rounded_rectangle(10, 190, 490, 240, radius=20, fill='#2e2e2e', outline='#2e2e2e')
+
+    current_file_label = tk.Label(overlay_frame, text="Scanne Datei: ", font=("Arial", 12), bg='#2e2e2e', fg='#ffffff',
+                                  anchor="w")
+    overlay_frame.create_window(250, 35, window=current_file_label)
+
+    elapsed_time_label = tk.Label(overlay_frame, text="Verstrichene Zeit: 00:00", font=("Arial", 12), bg='#2e2e2e',
+                                  fg='#ffffff', anchor="w")
+    overlay_frame.create_window(250, 95, window=elapsed_time_label)
+
+    malware_label = tk.Label(overlay_frame, text="Malware gefunden: 0", font=("Arial", 12), bg='#2e2e2e', fg='#ffffff',
+                             anchor="w")
+    overlay_frame.create_window(250, 155, window=malware_label)
+
+    scanned_files_label = tk.Label(overlay_frame, text="Gesamt gescannte Dateien: 0", font=("Arial", 12), bg='#2e2e2e',
+                                   fg='#ffffff', anchor="w")
+    overlay_frame.create_window(250, 215, window=scanned_files_label)
+
+    stop_button = ttk.Button(scan_window, text="Scan stoppen", command=stop_scan)
+    stop_button.pack(pady=20)
+
+    scan_thread = Thread(target=scan_directory, args=(directory, stop_event, scan_type, custom_dirs))
+    scan_thread.start()
+
+def stop_scan():
+    stop_event.set()
+
+def open_settings():
+    settings_window = tk.Toplevel()
+    settings_window.title("Einstellungen")
+    settings_window.geometry("300x200")
+    settings_window.configure(bg='#1e1e1e')
+
+    delete_files_var = tk.BooleanVar(value=settings['delete_files'])
+
+    tk.Label(settings_window, text="Dateien löschen nach Erkennung:", bg='#1e1e1e', fg='#ffffff').pack(pady=10)
+    tk.Checkbutton(settings_window, text="Ja", variable=delete_files_var, bg='#1e1e1e', fg='#ffffff').pack()
+
+    ttk.Button(settings_window, text="Speichern", command=lambda: save_settings(delete_files_var.get())).pack(pady=10)
+
+def save_settings(delete_files):
+    settings['delete_files'] = delete_files
+
+def load_image(path, size=(100, 100), maintain_aspect_ratio=False):
+    try:
+        image = Image.open(path)
+        if maintain_aspect_ratio:
+            image.thumbnail(size, Image.ANTIALIAS)
+        else:
+            image = image.resize(size)
+        return ImageTk.PhotoImage(image)
+    except IOError:
+        return None
+
+def start_main_window():
+    global settings, stop_event
+
+    settings = {'delete_files': False}
+    stop_event = Event()
+
+    root = tk.Tk()
+    root.title("Malware Scanner")
+    root.geometry("400x300")
+    root.configure(bg='#1e1e1e')
+
+    quick_scan_button = tk.Button(root, text="Schnellscan", command=lambda: start_scan("quick"), bg='#262626',
+                                  fg='#ffffff', font=("Arial", 12), width=15)
+    quick_scan_button.pack(pady=10)
+
+    full_scan_button = tk.Button(root, text="Vollständiger Scan", command=lambda: start_scan("full"), bg='#262626',
+                                 fg='#ffffff', font=("Arial", 12), width=15)
+    full_scan_button.pack(pady=10)
+
+    custom_scan_button = tk.Button(root, text="Benutzerdefinierter Scan", command=lambda: start_scan("custom"),
+                                   bg='#262626', fg='#ffffff', font=("Arial", 12), width=15)
+    custom_scan_button.pack(pady=10)
+
+    settings_button = tk.Button(root, text="Einstellungen", command=open_settings, bg='#262626', fg='#ffffff',
+                                font=("Arial", 12), width=15)
+    settings_button.pack(pady=10)
+
+    root.mainloop()
+
+if __name__ == "__main__":
+    start_main_window()
