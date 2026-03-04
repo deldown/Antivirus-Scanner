@@ -4,3 +4,4 @@ Der Quellcode ist frei verfügbar und kann unter Nennung des Urhebers uneingesch
 
 Viel Spaß mit den Produkt
 :)
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/F2F51VDAOO)
